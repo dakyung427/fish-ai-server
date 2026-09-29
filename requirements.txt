@@ -3,6 +3,8 @@ uvicorn
 pydantic
 ultralytics
 opencv-python
-python-multipart
 pillow
-python-multipart
+websockets
+python-dotenv
+numpy
+minisom
