@@ -20,7 +20,9 @@ class WebSocketClient:
         self.species_service = species_service
         self.camera = camera
 
+    # ==========================================
     # WebSocket 서버 연결
+    # ==========================================
     async def connect(self):
         print(f"WebSocket 연결 시도: {self.url}")
 
@@ -30,7 +32,18 @@ class WebSocketClient:
 
         print("WebSocket 연결 성공")
 
+        # Node.js에 AI 서버로 등록
+        await self.send_json(
+            {
+                "type": "Ai"
+            }
+        )
+
+        print("AI 서버 등록 메시지 전송 완료")
+
+    # ==========================================
     # JSON 메시지 전송
+    # ==========================================
     async def send_json(self, data):
 
         if self.websocket is None:
@@ -47,7 +60,9 @@ class WebSocketClient:
         print("WebSocket 전송:")
         print(message)
 
+    # ==========================================
     # 메시지 수신
+    # ==========================================
     async def receive_loop(self):
 
         async for message in self.websocket:
@@ -61,27 +76,54 @@ class WebSocketClient:
                 await self.handle_message(data)
 
             except json.JSONDecodeError:
-                print("잘못된 JSON 메시지:", message)
+                print(
+                    "잘못된 JSON 메시지:",
+                    message
+                )
 
+    # ==========================================
     # 받은 메시지 처리
+    # ==========================================
     async def handle_message(self, data):
 
         message_type = data.get("type")
 
+        # ======================================
         # 어종 분석 요청
-        if message_type == "species_request":
+        # Node → AI
+        # {
+        #   "type": "species",
+        #   "device_id": "..."
+        # }
+        # ======================================
+        if message_type == "species":
 
-            print("어종 분석 요청 수신")
+            device_id = data.get("device_id")
 
-            # 어종 분석 실행
+            if not device_id:
+                print(
+                    "species 요청에 device_id가 없습니다."
+                )
+                return
+
+            print(
+                f"어종 분석 요청 수신 - device_id: {device_id}"
+            )
+
+            # ==================================
+            # 3초 어종 분석
+            # ==================================
             result = self.species_service.analyze(
                 self.camera
             )
 
-            # Node.js로 결과 전송
+            # ==================================
+            # 분석 결과 Node로 전송
+            # ==================================
             await self.send_json(
                 {
                     "type": "species_result",
+                    "device_id": device_id,
                     "data": result
                 }
             )
@@ -92,8 +134,10 @@ class WebSocketClient:
                 message_type
             )
 
+    # ==========================================
     # WebSocket 실행
     # 연결 끊기면 자동 재연결
+    # ==========================================
     async def run(self):
 
         self.running = True
@@ -106,6 +150,7 @@ class WebSocketClient:
                 await self.receive_loop()
 
             except Exception as e:
+
                 print(
                     "WebSocket 연결 오류:",
                     e
@@ -119,7 +164,9 @@ class WebSocketClient:
 
                 await asyncio.sleep(3)
 
+    # ==========================================
     # 종료
+    # ==========================================
     async def stop(self):
 
         self.running = False
