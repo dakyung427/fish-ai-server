@@ -3,3 +3,12 @@ __pycache__/
 *.pyc
 .env
 *.mp4
+
+# 테스트 파일
+test_*
+
+# YOLO 모델 가중치
+weights/
+
+# 캡처 이미지
+captured_images/
