@@ -1,87 +1,93 @@
-
 import asyncio
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from core.yolo_priority import YOLOPriorityGate
-
 from vision.rtsp_camera import RTSPCamera
 from vision.detector import FishDetector
 from vision.detector_csrt import FishCSRTTracker
-
 from services.species_service import SpeciesService
 from services.activity_service import ActivityService
-
 from websocket.ws_client import WebSocketClient
 
-
-app = FastAPI(
-    title="Fish AI Server"
-)
-
+app = FastAPI(title='Fish AI Server')
 
 camera = None
-
 detector = None
 species_service = None
-
 activity_tracker = None
 activity_service = None
 activity_task = None
-
 ws_client = None
 ws_task = None
-
 yolo_gate = None
 
 
-# ==========================================
-# 서버 상태 확인
-# ==========================================
-@app.get("/health")
+@app.get('/health')
 async def health():
-    return {
-        "status": "ok"
-    }
+    return {'status': 'ok'}
 
 
-# ==========================================
-# FastAPI 시작 시 실행
-# ==========================================
-@app.on_event("startup")
+@app.get('/activity', response_class=HTMLResponse)
+async def activity_page():
+    return '''<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AI Activity Monitor</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: #101827; color: #f3f5f8;
+           font-family: Arial, sans-serif; }
+    main { max-width: 1100px; margin: auto; }
+    h1 { font-size: 26px; margin: 0 0 8px; }
+    p { color: #a7b4c7; margin: 6px 0 18px; }
+    .video { background: #050a12; border: 1px solid #344256;
+             border-radius: 10px; overflow: hidden; }
+    img { width: 100%; display: block; min-height: 200px; object-fit: contain; }
+    .hint { font-size: 13px; margin-top: 16px; }
+  </style>
+</head>
+<body><main>
+  <h1>AI Activity Monitor</h1>
+  <p>YOLO11 + CSRT + HSV + SOM · Real-time fish tracking</p>
+  <div class="video"><img src="/activity/stream" alt="실시간 추적 분석 영상"></div>
+  <p class="hint">Green: NORMAL · Red: WARNING · SOM window: 10 seconds</p>
+</main></body></html>'''
+
+
+@app.get('/activity/stream')
+async def activity_stream():
+    async def generate():
+        last_frame = None
+        while True:
+            frame = activity_service.preview_snapshot() if activity_service else None
+            if frame is not None and frame is not last_frame:
+                last_frame = frame
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n'
+                       b'Cache-Control: no-store\r\n\r\n' + frame + b'\r\n')
+            await asyncio.sleep(0.1)
+
+    return StreamingResponse(
+        generate(),
+        media_type='multipart/x-mixed-replace; boundary=frame',
+        headers={'Cache-Control': 'no-store'},
+    )
+
+
+@app.on_event('startup')
 async def startup_event():
+    global camera, detector, species_service, activity_tracker
+    global activity_service, activity_task, ws_client, ws_task, yolo_gate
 
-    global camera
-    global detector
-    global species_service
-    global activity_tracker
-    global activity_service
-    global activity_task
-    global ws_client
-    global ws_task
-    global yolo_gate
-
-    print("AI 서버 시작")
-
-    # ======================================
-    # RTSP 실시간 영상 연결
-    # ======================================
-    print("RTSP 실시간 영상 모드")
-
+    print('AI 서버 시작')
     camera = RTSPCamera()
     camera.start()
-
-    # ======================================
-    # YOLO 우선순위 제어
-    # ======================================
     yolo_gate = YOLOPriorityGate()
 
-    # ======================================
-    # 기존 YOLO + ByteTrack
-    # ======================================
     detector = FishDetector()
-
-    # 갱신하기 YOLO는 낮은 우선순위
     original_detect = detector.detect
 
     def safe_detect(frame):
@@ -89,116 +95,48 @@ async def startup_event():
             return original_detect(frame)
 
     detector.detect = safe_detect
+    species_service = SpeciesService(detector=detector, analysis_time=3.0)
+    print('[SPECIES] ready')
 
-    # ======================================
-    # 기존 어종·개체수 분석 서비스
-    # ======================================
-    species_service = SpeciesService(
-        detector=detector,
-        analysis_time=3.0
-    )
-
-    print("[SPECIES] 어종 분석 준비 완료")
-
-    # ======================================
-    # YOLO + CSRT + HSV 추적기
-    # ======================================
     activity_tracker = FishCSRTTracker(
-        weights_path="weights/best.pt",
-        yolo_gate=yolo_gate
+        weights_path='weights/best.pt', yolo_gate=yolo_gate
     )
-
-    print("[TRACKER] CSRT 추적기 준비 완료")
-
-    # ======================================
-    # SOM 활동성 이상탐지 서비스
-    # ======================================
     activity_service = ActivityService(
-        tracker=activity_tracker,
-        camera=camera,
-        model_path="weights/som_model.npz"
+        tracker=activity_tracker, camera=camera,
+        model_path='weights/som_model.npz'
     )
+    print('[ACTIVITY] ready')
 
-    print("[ACTIVITY] SOM 분석 준비 완료")
-
-    # ======================================
-    # Node.js WebSocket 연결
-    # ======================================
     ws_client = WebSocketClient(
         species_service=species_service,
         activity_service=activity_service,
-        camera=camera
+        camera=camera,
     )
-
-    # WebSocket 클라이언트 실행
-    ws_task = asyncio.create_task(
-        ws_client.run()
-    )
-
-    # ======================================
-    # 활동성 분석 별도 스레드 실행
-    # ======================================
-    activity_task = asyncio.create_task(
-        asyncio.to_thread(
-            activity_service.run_sync
-        )
-    )
-
-    print("AI 서버 초기화 완료")
+    ws_task = asyncio.create_task(ws_client.run())
+    activity_task = asyncio.create_task(asyncio.to_thread(activity_service.run_sync))
+    print('AI 서버 초기화 완료')
 
 
-# ==========================================
-# FastAPI 종료 시 실행
-# ==========================================
-@app.on_event("shutdown")
+@app.on_event('shutdown')
 async def shutdown_event():
-
-    global camera
-    global activity_service
-    global activity_task
-    global ws_client
-    global ws_task
-
-    print("AI 서버 종료 중...")
-
-    # ======================================
-    # 활동성 분석 종료 요청
-    # ======================================
+    print('AI 서버 종료 중...')
     if activity_service is not None:
         activity_service.stop()
-
-    # ======================================
-    # WebSocket 종료
-    # ======================================
     if ws_client is not None:
         await ws_client.stop()
-
     if ws_task is not None:
         ws_task.cancel()
-
         try:
             await ws_task
         except asyncio.CancelledError:
             pass
-
-    # ======================================
-    # RTSP 카메라 종료
-    # ======================================
-    if camera is not None:
-        camera.stop()
-
-    # ======================================
-    # 활동성 분석 종료 대기
-    # ======================================
     if activity_task is not None:
         try:
-            await asyncio.wait_for(
-                activity_task,
-                timeout=5.0
-            )
+            await asyncio.wait_for(activity_task, timeout=5.0)
         except asyncio.TimeoutError:
-            print("[ACTIVITY] 종료 대기 시간 초과")
+            print('[ACTIVITY] 분석 스레드 종료 대기 초과')
         except asyncio.CancelledError:
             pass
-
-    print("AI 서버 종료 완료")
+    if camera is not None:
+        camera.stop()
+    print('AI 서버 종료 완료')
