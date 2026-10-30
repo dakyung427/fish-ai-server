@@ -11,8 +11,6 @@ from config import SPECIES_NAME_KO
 
 ANALYSIS_TIME = 3.0
 
-# 전체 분석 프레임 중 50% 이상 검출되면 인정
-MIN_DETECTION_RATIO = 0.50
 
 
 class SpeciesService:
@@ -111,19 +109,7 @@ class SpeciesService:
                 else 0.0
             )
 
-            # ======================================
-            # 검출 비율 검증
-            # 최소 검출 횟수 제한 없음
-            # ======================================
-            if detection_ratio < MIN_DETECTION_RATIO:
 
-                print(
-                    f"[SPECIES] ID={track_id} 제외 "
-                    f"(검출={detection_count}/{total_frames}, "
-                    f"비율={detection_ratio:.1%})",
-                    flush=True
-                )
-                continue
 
             # ======================================
             # Track ID별 최빈 어종 결정

@@ -86,8 +86,10 @@ class SOMAnalyzer:
         self.final_abnormal = self.warning > 0
 
         self.last_result = "PAUSED"
-        self.last_score = None
-        self.last_features = None
+        # 마지막 SOM 점수와 특징값 유지
+        # # self.last_score = None
+        # # self.last_features = None
+       
 
         # 마지막 분석 완료 시각은 유지
         # ActivityResultService에서 이전 판정의 유효시간 판단

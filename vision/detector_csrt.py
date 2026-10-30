@@ -14,8 +14,8 @@ COLOR_DISTANCE_LIMIT = 0.48
 MAX_CENTER_JUMP = 2.5
 TARGETS = ("goldfish", "fishmodel")
 
-SAME_TARGET_MAX_GAP = 2.0
-SAME_TARGET_MAX_JUMP = 1.5
+SAME_TARGET_MAX_GAP = 4.0
+SAME_TARGET_MAX_JUMP = 2.0
 
 # A goldfish candidate cannot replace the model fish at the same position
 # unless its appearance matches the previously learned goldfish appearance.
