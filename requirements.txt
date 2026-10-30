@@ -2,7 +2,7 @@ fastapi
 uvicorn
 pydantic
 ultralytics
-opencv-python
+opencv-contrib-python
 pillow
 websockets
 python-dotenv
