@@ -1,237 +1,430 @@
 
-import 'dart:async';
-import 'dart:convert';
+import asyncio
+import json
+import time
 
-import 'package:flutter/foundation.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
+import websockets
 
-class SocketService {
-  SocketService._();
+from config import NODE_WS_URL
+from services.activity_result_service import ActivityResultService
 
-  static final SocketService instance = SocketService._();
 
-  WebSocketChannel? _channel;
+# ==========================================
+# 설정
+# ==========================================
 
-  int? _userId;
+# 실제 어항 기기번호
+DEVICE_ID = "SS501"
 
-  Timer? _reconnectTimer;
+# SOM 상태 확인 간격 (초)
+ACTIVITY_CHECK_INTERVAL = 0.5
 
-  bool _isReconnecting = false;
-  bool _manualDisconnect = false;
+# SOM 결과 주기적 재전송 간격 (초)
+ACTIVITY_RESEND_INTERVAL = 10.0
 
-  final StreamController<Map<String, dynamic>> _controller =
-      StreamController<Map<String, dynamic>>.broadcast();
 
-  bool get isConnected => _channel != null;
+class WebSocketClient:
 
-  Stream<Map<String, dynamic>> get stream => _controller.stream;
+    def __init__(
+        self,
+        species_service,
+        camera,
+        activity_service=None,
+        url=NODE_WS_URL
+    ):
+        self.url = url
+        self.websocket = None
+        self.running = False
 
-  Future<void> connect(int userId) async {
-    if (_channel != null) {
-      return;
-    }
+        self.species_service = species_service
+        self.activity_service = activity_service
+        self.camera = camera
 
-    _userId = userId;
-    _manualDisconnect = false;
+        # ==========================================
+        # SOM 활동성 결과 집계 서비스
+        # ==========================================
+        self.activity_result_service = (
+            ActivityResultService(activity_service)
+            if activity_service is not None
+            else None
+        )
 
-    try {
-      // .env에서 API 서버 주소 가져오기
-      final String apiBaseUrl = dotenv.env['API_BASE_URL'] ?? '';
+        self.send_lock = asyncio.Lock()
 
-      if (apiBaseUrl.isEmpty) {
-        throw Exception('API_BASE_URL이 .env에 설정되지 않았습니다.');
-      }
+        self.activity_task = None
+        self.species_tasks = set()
+        self.species_busy = False
 
-      // HTTP 주소를 WebSocket 주소로 변환
-      final String wsUrl = apiBaseUrl
-          .replaceFirst('http://', 'ws://')
-          .replaceFirst('https://', 'wss://');
+        # ==========================================
+        # 마지막 SOM 전송 상태
+        # ==========================================
+        self.last_activity_signature = None
+        self.last_activity_sent_at = 0.0
 
-      debugPrint('[WS] 연결 시도: $wsUrl');
+    # ==========================================
+    # WebSocket 서버 연결
+    # ==========================================
+    async def connect(self):
 
-      final channel = WebSocketChannel.connect(
-        Uri.parse(wsUrl),
-      );
+        print(
+            f"WebSocket 연결 시도: {self.url}",
+            flush=True
+        )
 
-      await channel.ready;
+        self.websocket = await websockets.connect(
+            self.url
+        )
 
-      if (_manualDisconnect) {
-        await channel.sink.close();
-        return;
-      }
+        print("WebSocket 연결 성공", flush=True)
 
-      _channel = channel;
+        # AI 서버 등록
+        await self.send_json({
+            "type": "Ai"
+        })
 
-      _reconnectTimer?.cancel();
-      _reconnectTimer = null;
-      _isReconnecting = false;
+        print(
+            "AI 서버 등록 메시지 전송 완료",
+            flush=True
+        )
 
-      debugPrint('[WS] WebSocket 연결 성공');
+        # ======================================
+        # 재연결 시 현재 SOM 상태 재전송 허용
+        # ======================================
+        self.last_activity_signature = None
+        self.last_activity_sent_at = 0.0
 
-      // 서버에 사용자 등록
-      send({
-        'type': 'registerUser',
-        'user_id': userId,
-      });
+    # ==========================================
+    # JSON 메시지 전송
+    # ==========================================
+    async def send_json(self, data):
 
-      // 서버에서 오는 메시지는 여기서 한 번만 받음
-      channel.stream.listen(
-        (message) {
-          try {
-            final decoded = jsonDecode(message);
+        message = json.dumps(
+            data,
+            ensure_ascii=False
+        )
 
-            if (decoded is Map<String, dynamic>) {
+        async with self.send_lock:
 
-              // ======================================
-              // 수신 메시지 타입 확인
-              // ======================================
-              debugPrint(
-                '[WS] 메시지 수신 type: ${decoded['type']}',
-              );
+            if self.websocket is None:
+                print(
+                    "WebSocket 연결 안 됨",
+                    flush=True
+                )
+                return False
 
-              // ======================================
-              // SOM 활동성 분석 결과 확인
-              // ======================================
-              if (decoded['type'] == 'activity_result') {
-                debugPrint(
-                  '[FLUTTER] 활동성 결과 수신: $decoded',
-                );
+            await self.websocket.send(message)
 
-                final data = decoded['data'];
+        print(
+            "[WS] 전송:",
+            message,
+            flush=True
+        )
 
-                if (data is Map) {
-                  debugPrint(
-                    '[FLUTTER] 건강=${data['healthy']}, '
-                    '주의=${data['abnormal']}',
-                  );
-                } else {
-                  debugPrint(
-                    '[FLUTTER] 활동성 data 형식 오류: $data',
-                  );
-                }
-              }
+        return True
 
-              // ======================================
-              // 어종 분석 결과 확인
-              // ======================================
-              if (decoded['type'] == 'species_result') {
-                debugPrint(
-                  '[FLUTTER] 어종 분석 결과 수신: $decoded',
-                );
-              }
+    # ==========================================
+    # 어종 분석 작업
+    # ==========================================
+    async def run_species_analysis(self, device_id):
 
-              // 기존 메시지 전달 유지
-              _controller.add(decoded);
-            } else {
-              debugPrint(
-                '[WS] 예상하지 못한 데이터 형식: $decoded',
-              );
-            }
-          } catch (e) {
-            debugPrint('WebSocket 데이터 변환 실패: $e');
-          }
-        },
-        onError: (error) {
-          debugPrint('[WS] WebSocket 오류: $error');
+        try:
 
-          if (_channel == channel) {
-            _channel = null;
-          }
+            print(
+                f"[SPECIES] 분석 시작: {device_id}",
+                flush=True
+            )
 
-          _reconnect();
-        },
-        onDone: () {
-          debugPrint('[WS] WebSocket 연결 종료됨');
+            # 이벤트 루프 차단 방지
+            result = await asyncio.to_thread(
+                self.species_service.analyze,
+                self.camera
+            )
 
-          if (_channel == channel) {
-            _channel = null;
-          }
+            await self.send_json({
+                "type": "species_result",
+                "device_id": device_id,
+                "data": result
+            })
 
-          _reconnect();
-        },
-      );
-    } catch (error) {
-      debugPrint('[WS] WebSocket 연결 실패: $error');
+            print(
+                "[SPECIES] 분석 결과 전송 완료",
+                flush=True
+            )
 
-      _channel = null;
+        except asyncio.CancelledError:
+            raise
 
-      _reconnect();
-    }
-  }
+        except Exception as exc:
 
-  void _reconnect() {
-    // 사용자가 직접 disconnect 한 경우
-    if (_manualDisconnect) {
-      return;
-    }
+            print(
+                f"[SPECIES] 분석 오류: {exc}",
+                flush=True
+            )
 
-    // 이미 재연결 대기 중
-    if (_isReconnecting) {
-      return;
-    }
+        finally:
+            self.species_busy = False
 
-    // userId가 없으면 재연결 불가능
-    final userId = _userId;
+    # ==========================================
+    # SOM 활동성 결과 집계
+    # ==========================================
+    def get_activity_result(self):
 
-    if (userId == null) {
-      return;
-    }
+        if self.activity_result_service is None:
+            return None
 
-    _isReconnecting = true;
+        # 별도 서비스에서 건강/주의 개체 수 집계
+        # 일시적인 추적 재초기화 시 마지막 유효 판정 유지
+        return self.activity_result_service.get_result()
 
-    debugPrint('[WS] 3초 후 WebSocket 재연결 시도');
+    # ==========================================
+    # SOM 상태 변경 감지 및 주기적 전송
+    # ==========================================
+    async def activity_send_loop(self):
 
-    _reconnectTimer?.cancel();
+        print(
+            "[ACTIVITY] 상태 감시 시작",
+            flush=True
+        )
 
-    _reconnectTimer = Timer(
-      const Duration(seconds: 3),
-      () async {
-        _isReconnecting = false;
+        while self.running:
 
-        if (_manualDisconnect) {
-          return;
-        }
+            try:
 
-        debugPrint('[WS] WebSocket 재연결 중...');
+                activity = self.get_activity_result()
 
-        await connect(userId);
-      },
-    );
-  }
+                if activity is not None:
 
-  void send(Map<String, dynamic> data) {
-    final channel = _channel;
+                    result, signature = activity
 
-    if (channel == null) {
-      debugPrint('[WS] WebSocket이 연결되어 있지 않습니다.');
-      return;
-    }
+                    now = time.monotonic()
 
-    channel.sink.add(
-      jsonEncode(data),
-    );
+                    # ==================================
+                    # 전송 조건
+                    # 1. 최초 전송
+                    # 2. 건강/주의 상태 변경
+                    # 3. 마지막 전송 후 10초 경과
+                    # ==================================
+                    state_changed = (
+                        signature != self.last_activity_signature
+                    )
 
-    debugPrint('[WS] 전송: $data');
-  }
+                    resend_due = (
+                        now - self.last_activity_sent_at
+                        >= ACTIVITY_RESEND_INTERVAL
+                    )
 
-  Future<void> disconnect() async {
-    _manualDisconnect = true;
+                    if state_changed or resend_due:
 
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
+                        sent = await self.send_json({
+                            "type": "activity_result",
+                            "device_id": DEVICE_ID,
+                            "data": result
+                        })
 
-    _isReconnecting = false;
+                        if sent:
 
-    final channel = _channel;
+                            self.last_activity_signature = signature
+                            self.last_activity_sent_at = (
+                                time.monotonic()
+                            )
 
-    _channel = null;
-    _userId = null;
+                            if state_changed:
+                                reason = "상태 변경"
+                            else:
+                                reason = "10초 주기 재전송"
 
-    if (channel != null) {
-      await channel.sink.close();
-    }
+                            print(
+                                f"[ACTIVITY] {reason}: "
+                                f"건강={result['healthy']} "
+                                f"주의={result['abnormal']}",
+                                flush=True
+                            )
 
-    debugPrint('[WS] WebSocket 연결 종료');
-  }
-}
+            except asyncio.CancelledError:
+                raise
+
+            except Exception as exc:
+
+                print(
+                    f"[ACTIVITY] 전송 오류: {exc}",
+                    flush=True
+                )
+
+                # 오류 발생 시 재연결 처리
+                raise
+
+            await asyncio.sleep(
+                ACTIVITY_CHECK_INTERVAL
+            )
+
+    # ==========================================
+    # 메시지 수신
+    # ==========================================
+    async def receive_loop(self):
+
+        async for message in self.websocket:
+
+            try:
+
+                data = json.loads(message)
+
+                print(
+                    "[WS] 수신:",
+                    data,
+                    flush=True
+                )
+
+                await self.handle_message(data)
+
+            except json.JSONDecodeError:
+
+                print(
+                    "잘못된 JSON 메시지:",
+                    message,
+                    flush=True
+                )
+
+    # ==========================================
+    # Node.js 메시지 처리
+    # ==========================================
+    async def handle_message(self, data):
+
+        message_type = data.get("type")
+
+        # ======================================
+        # 어종·개체 수 분석 요청
+        # ======================================
+        if message_type == "species":
+
+            device_id = data.get("device_id")
+
+            if not device_id:
+
+                print(
+                    "species 요청에 device_id가 없습니다.",
+                    flush=True
+                )
+                return
+
+            if self.species_busy:
+
+                print(
+                    "[SPECIES] 이미 분석 중입니다.",
+                    flush=True
+                )
+                return
+
+            self.species_busy = True
+
+            task = asyncio.create_task(
+                self.run_species_analysis(device_id)
+            )
+
+            self.species_tasks.add(task)
+
+            task.add_done_callback(
+                self.species_tasks.discard
+            )
+
+        else:
+
+            print(
+                "알 수 없는 메시지 type:",
+                message_type,
+                flush=True
+            )
+
+    # ==========================================
+    # WebSocket 실행 / 자동 재연결
+    # ==========================================
+    async def run(self):
+
+        self.running = True
+
+        while self.running:
+
+            try:
+
+                await self.connect()
+
+                # ==================================
+                # SOM 상태 자동 전송 작업 시작
+                # ==================================
+                if self.activity_service is not None:
+
+                    self.activity_task = asyncio.create_task(
+                        self.activity_send_loop()
+                    )
+
+                await self.receive_loop()
+
+            except asyncio.CancelledError:
+                raise
+
+            except Exception as exc:
+
+                print(
+                    f"WebSocket 연결 오류: {exc}",
+                    flush=True
+                )
+
+            finally:
+
+                # ==================================
+                # 기존 SOM 전송 작업 종료
+                # ==================================
+                if self.activity_task is not None:
+
+                    self.activity_task.cancel()
+
+                    try:
+                        await self.activity_task
+
+                    except asyncio.CancelledError:
+                        pass
+
+                    except Exception as exc:
+                        print(
+                            f"[ACTIVITY] 작업 종료: {exc}",
+                            flush=True
+                        )
+
+                    self.activity_task = None
+
+                # ==================================
+                # WebSocket 연결 종료
+                # ==================================
+                if self.websocket is not None:
+
+                    await self.websocket.close()
+                    self.websocket = None
+
+            if self.running:
+
+                print(
+                    "3초 후 WebSocket 재연결...",
+                    flush=True
+                )
+
+                await asyncio.sleep(3)
+
+    # ==========================================
+    # WebSocket 종료
+    # ==========================================
+    async def stop(self):
+
+        self.running = False
+
+        if self.activity_task is not None:
+            self.activity_task.cancel()
+
+        for task in list(self.species_tasks):
+            task.cancel()
+
+        if self.websocket is not None:
+            await self.websocket.close()
+
+        print(
+            "WebSocket 종료",
+            flush=True
+        )
