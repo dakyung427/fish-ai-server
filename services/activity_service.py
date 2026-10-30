@@ -175,7 +175,7 @@ class SOMAnalyzer:
 
         # 기존 warning 누적 방식 유지
         self.warning = (
-            min(10, self.warning + 1)
+            min(2, self.warning + 1)
             if abnormal
             else max(0, self.warning - 1)
         )
