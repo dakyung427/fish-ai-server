@@ -84,8 +84,6 @@ BYTETRACK_CONFIG=trackers/custom_bytetrack.yaml
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-서버 실행 시 RTSP 영상 연결, YOLO 모델 초기화, SOM 활동성 분석 및 WebSocket 통신이 시작됩니다.
-
 - 서버 상태 확인: `http://localhost:8000/health`
 - 활동성 추적 영상 확인: `http://localhost:8000/activity`
 
