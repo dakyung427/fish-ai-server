@@ -78,8 +78,6 @@ BYTETRACK_CONFIG=trackers/custom_bytetrack.yaml
 - `YOLO_MODEL_PATH`: 학습된 YOLO 모델 경로
 - `BYTETRACK_CONFIG`: ByteTrack 설정 파일 경로
 
-> 위 환경 변수 이름은 `config.py`와 `.env.example`의 실제 설정과 일치해야 합니다. `main.py`에서는 활동성 분석용 모델을 `weights/best.pt`, SOM 모델을 `weights/som_model.npz`에서 불러옵니다.
-
 ### 5️⃣ AI 서버 실행
 
 ```powershell
