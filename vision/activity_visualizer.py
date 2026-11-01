@@ -46,6 +46,7 @@ class ActivityVisualizer:
                             cv2.FONT_HERSHEY_SIMPLEX, .45, color, 1)
             else:
                 trail.clear()
+                continue
             y = 26 + idx * 84
             cv2.putText(display, f'{name.upper()} {target.state}', (12, y),
                         cv2.FONT_HERSHEY_SIMPLEX, .55, color, 1)
