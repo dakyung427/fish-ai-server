@@ -190,12 +190,57 @@ class TrackState:
             if need_reset:
                 same_target = self.is_same_target(new_box, now)
                 new_hist = histogram(frame, new_box)
-                # Don't learn the wrong model-fish colors as goldfish identity.
+                identity_distance = hist_distance(self.identity_hist, new_hist)
+                recent_distance = hist_distance(self.reference_hist, new_hist)
+                previous_box = self.bbox
+                normalized_jump = (
+                    math.dist(center(previous_box), center(new_box)) /
+                    max(1, max(previous_box[2], previous_box[3]))
+                    if previous_box is not None else float("inf")
+                )
+
+                # A fixed identity histogram can become stale as a fish turns
+                # or lighting changes. Trust a recent visual match only if the
+                # new box is also very close to the previous tracked box.
+                # Never use this exception on a fishmodel overlap.
+                model_conflict = (
+                    self.name == "goldfish"
+                    and model_box is not None
+                    and overlap_ratio(new_box, model_box) >= MODEL_OVERLAP_LIMIT
+                )
                 if self.name == "goldfish" and self.identity_hist is not None:
-                    if hist_distance(self.identity_hist, new_hist) > IDENTITY_COLOR_LIMIT:
+                    identity_ok = identity_distance <= IDENTITY_COLOR_LIMIT
+                    recent_match = (
+                        not model_conflict
+                        and previous_box is not None
+                        and new_hist is not None
+                        and self.reference_hist is not None
+                        and self.last_good_at is not None
+                        and 0 <= now - self.last_good_at <= 2.0
+                        and normalized_jump <= 0.50
+                        and overlap_ratio(previous_box, new_box) >= 0.40
+                        and recent_distance <= 0.30
+                    )
+                    if not identity_ok and not recent_match:
                         same_target = False
-                        if overlap_ratio(new_box, model_box) >= MODEL_OVERLAP_LIMIT:
+                        if model_conflict:
                             return
+                    elif not identity_ok and recent_match:
+                        print(
+                            f"[TRACK] {self.name} near recent appearance; "
+                            "keeping SOM continuity despite identity color change",
+                            flush=True,
+                        )
+                if not same_target:
+                    print(
+                        f"[TRACK DIAG] {self.name} SOM reset: "
+                        f"suspect={suspect} tracker_missing={self.tracker is None} "
+                        f"jump={normalized_jump:.2f} "
+                        f"identity_dist={identity_distance:.3f} "
+                        f"recent_dist={recent_distance:.3f} "
+                        f"model_conflict={model_conflict}",
+                        flush=True,
+                    )
                 self.tracker = create_tracker(frame, new_box)
                 self.bbox = new_box
                 self.reference_hist = new_hist
@@ -203,8 +248,16 @@ class TrackState:
                 self.conflict_count = 0
                 self.state = "TRACKING"
                 self.last_good_at = now
-                if self.name == "goldfish" and self.identity_hist is None and new_hist is not None:
-                    self.identity_hist = new_hist.copy()
+                if self.name == "goldfish" and new_hist is not None:
+                    if self.identity_hist is None:
+                        self.identity_hist = new_hist.copy()
+                    elif same_target and normalized_jump <= 0.50 and not model_conflict:
+                        # Adapt very slowly; avoid learning an unrelated fish.
+                        self.identity_hist = (
+                            0.95 * self.identity_hist + 0.05 * new_hist
+                        ).astype("float32")
+                        cv2.normalize(self.identity_hist, self.identity_hist,
+                                      1.0, 0, cv2.NORM_L1)
                 if same_target:
                     print(f"[YOLO] {self.name} CSRT recovered (SOM maintained)", flush=True)
                 else:
