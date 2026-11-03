@@ -1,7 +1,7 @@
 """Goldfish / Fishmodel SOM 결과를 Node.js 전송 형식으로 집계한다."""
 import time
 
-TRACK_LOST_HOLD_SECONDS = 15.0
+TRACK_LOST_HOLD_SECONDS = 5.0
 MAX_RESULT_AGE_SECONDS = 15.0  # 마지막 SOM 분석 이후 최대 유지 시간
 
 
