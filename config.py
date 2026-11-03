@@ -34,7 +34,7 @@ SPECIES_NAME_KO = {
     "ButterflyFish": "나비고기",
     "ClownFish": "흰동가리",
     "GoldFish": "금붕어",
-    "FishModel": "돌고래",  
+    "FishModel": "모형",  
     "Gourami": "구라미",
     "MorishIdol": "무어리쉬 아이돌",
     "PlatyFish": "플래티",

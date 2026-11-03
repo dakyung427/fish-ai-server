@@ -1,4 +1,3 @@
-
 """10-second SOM activity analysis from a shared, sequence-numbered RTSP camera."""
 
 import math
@@ -8,13 +7,18 @@ import time
 import numpy as np
 
 from vision.activity_visualizer import ActivityVisualizer
+from vision.detector_csrt import center, histogram, hist_distance
 
 
 # ==========================================
 # SOM 분석 설정
 # ==========================================
 WINDOW_SECONDS = 10.0
-JITTER_DEADBAND_BODY = 0.015
+JITTER_DEADBAND_BODY = 0.030
+SOM_UPDATE_SECONDS = 3.0
+MAX_RESULT_HOLD = 15.0
+RECOVERY_PROBE_SECONDS = 0.8
+MAX_TRACKING_GAP = 0.8
 SMOOTH_RADIUS = 3
 
 
@@ -43,6 +47,7 @@ class SOMAnalyzer:
 
         self.samples = []
         self.start = None
+        self.next_eval_t = None
 
         self.warning = 0
         self.final_abnormal = False
@@ -55,97 +60,55 @@ class SOMAnalyzer:
         self.last_analyzed_at = None
 
     # ==========================================
-    # SOM 분석 초기화
+    # 추적 변경 시 윈도우 초기화 (이전 표시 결과는 잠깐 HOLD)
     # ==========================================
     def reset(self, target_name="UNKNOWN", reason="tracking reset"):
-
-        # 초기화 이전 상태 기록
-        previous_status = self.last_result
-        previous_samples = len(self.samples)
-
-        elapsed = (
-            self.samples[-1][0] - self.start
-            if self.start is not None and self.samples
-            else 0.0
-        )
-
-        print(
-            f"[SOM RESET][{target_name.upper()}] "
-            f"reason={reason} "
-            f"previous={previous_status} "
-            f"elapsed={elapsed:.1f}/{WINDOW_SECONDS:.1f}s "
-            f"samples={previous_samples} "
-            f"warning={self.warning}",
-            flush=True,
-        )
-
+        print(f"[SOM RESET][{target_name.upper()}] reason={reason} "
+              f"samples={len(self.samples)} warning={self.warning}", flush=True)
         self.samples.clear()
         self.start = None
+        self.next_eval_t = None
+        self.warning = 0
+        self.final_abnormal = False
+        self.last_result = "PAUSED" if self.last_score is not None else "WAITING"
+        # last_score/last_features/last_analyzed_at: 과거값 표시용. 새 판정이 아님.
 
-        # 기존 warning 누적값 유지
-        self.final_abnormal = self.warning > 0
-
-        self.last_result = "PAUSED"
-        # 마지막 SOM 점수와 특징값 유지
-        # # self.last_score = None
-        # # self.last_features = None
-       
-
-        # 마지막 분석 완료 시각은 유지
-        # ActivityResultService에서 이전 판정의 유효시간 판단
-
-    # ==========================================
-    # 프레임별 추적 결과 수집
-    # ==========================================
     def add(self, timestamp, bbox, target_name="UNKNOWN"):
-
-        if self.start is None:
-            self.start = timestamp
+        # 마지막 유효 결과의 표시 기한 만료
+        if (self.last_result in ("PAUSED", "NORMAL", "WARNING", "INSUFFICIENT TRACKING")
+                and self.last_analyzed_at is not None
+                and time.monotonic() - self.last_analyzed_at > MAX_RESULT_HOLD):
+            self.last_result = "WAITING"
+            self.last_score = None
+            self.last_features = None
 
         if bbox is None:
-            self.samples.append(
-                (
-                    timestamp,
-                    float("nan"),
-                    float("nan"),
-                    float("nan"),
-                    0,
-                )
-            )
+            sample = (timestamp, float("nan"), float("nan"), float("nan"), 0)
         else:
             bx, by, bw, bh = bbox
+            sample = (timestamp, bx + bw / 2, by + bh / 2, math.hypot(bw, bh), 1)
 
-            self.samples.append(
-                (
-                    timestamp,
-                    bx + bw / 2,
-                    by + bh / 2,
-                    math.hypot(bw, bh),
-                    1,
-                )
-            )
+        self.samples.append(sample)
+        cutoff = timestamp - WINDOW_SECONDS
+        while self.samples and self.samples[0][0] < cutoff:
+            self.samples.pop(0)
 
-        if timestamp - self.start < WINDOW_SECONDS:
+        if self.next_eval_t is None:
+            self.next_eval_t = timestamp + WINDOW_SECONDS
+            return
+        if timestamp + 1e-9 < self.next_eval_t:
+            return
+        self.next_eval_t = timestamp + SOM_UPDATE_SECONDS
+
+        # 정확한 10초 구간이 없으면 분석하지 않음
+        if not self.samples or timestamp - self.samples[0][0] < WINDOW_SECONDS - 0.25:
             return
 
         row = self.features_for_window(self.samples)
-
-        self.samples = []
-        self.start = None
-
-        # ======================================
-        # 유효한 추적 데이터 부족
-        # ======================================
         if row is None:
-
-            self.last_result = "INSUFFICIENT TRACKING"
-
-            print(
-                f"[SOM][{target_name.upper()}] "
-                f"insufficient tracking; "
-                f"WARNING={self.warning} (held)",
-                flush=True,
-            )
+            if self.last_result not in ("PAUSED", "NORMAL", "WARNING"):
+                self.last_result = "INSUFFICIENT TRACKING"
+            print(f"[SOM SKIP][{target_name.upper()}] insufficient 10s tracking", flush=True)
             return
 
         # ======================================
@@ -175,14 +138,20 @@ class SOMAnalyzer:
 
         abnormal = score > self.threshold
 
-        # 기존 warning 누적 방식 유지
-        self.warning = (
-            min(2, self.warning + 1)
-            if abnormal
-            else max(0, self.warning - 1)
-        )
+        # 이상 점수는 경고 누적 +1 (최대 2).
+        # 정상 점수라도 정지 비율이 60% 이상이면 누적 경고를 유지한다.
+        # WARNING 진입은 누적 2, 해제는 누적 0으로 히스테리시스 적용.
+        still_ratio = row["still_ratio"]
+        if abnormal:
+            self.warning = min(2, self.warning + 1)
+        elif still_ratio < 0.60:
+            self.warning = max(0, self.warning - 1)
 
-        self.final_abnormal = self.warning > 0
+        if self.warning >= 2:
+            self.final_abnormal = True
+        elif self.warning == 0:
+            self.final_abnormal = False
+        # warning == 1이면 직전 확정 상태 유지
 
         self.last_score = score
         self.last_features = row
@@ -305,6 +274,96 @@ class SOMAnalyzer:
         }
 
 
+class SOMContinuityGuard:
+    """CSRT의 raw 박스와 SOM에 입력할 신뢰 박스를 분리한다 (v5 방식)."""
+
+    def __init__(self, name):
+        self.name = name
+        self.clear()
+
+    def clear(self):
+        self.anchor = None  # (timestamp, box, HSV hist)
+        self.suspect_since = None
+        self.suspect_reason = None
+        self.missing_since = None
+
+    @staticmethod
+    def _compare(anchor, box, frame, timestamp):
+        old_t, old_box, old_hist = anchor
+        old_size = max(1.0, math.hypot(old_box[2], old_box[3]))
+        new_size = max(1.0, math.hypot(box[2], box[3]))
+        ratio = max(old_size / new_size, new_size / old_size)
+        jump = math.dist(center(old_box), center(box)) / old_size
+        color = hist_distance(old_hist, histogram(frame, box))
+        return timestamp - old_t, jump, color, ratio
+
+    def accept(self, frame, timestamp, bbox, generation_changed, analyzer):
+        """유효 SOM bbox 반환. None이면 그 순간의 좌표는 사용하지 않는다."""
+        if bbox is None:
+            if self.missing_since is None:
+                self.missing_since = timestamp
+            if (timestamp - self.missing_since > MAX_TRACKING_GAP
+                    and self.anchor is not None):
+                analyzer.reset(self.name, 'tracking missing > 0.8s')
+                self.clear()
+                self.missing_since = timestamp
+            return None
+
+        if self.anchor is None:
+            self.anchor = (timestamp, tuple(bbox), histogram(frame, bbox))
+            self.missing_since = None
+            return bbox
+
+        # 의심 상태: 최대 0.8초 신뢰할 수 있는 기존 박스로 돌아오는지 확인
+        if self.suspect_since is not None:
+            gap, jump, color, ratio = self._compare(self.anchor, bbox, frame, timestamp)
+            recovered = (0 <= gap <= RECOVERY_PROBE_SECONDS + 0.25
+                         and jump <= 0.65 and color <= 0.70 and ratio <= 1.6)
+            if recovered:
+                print(f"[SOM RECOVERED][{self.name.upper()}] t={timestamp:.1f} "
+                      f"jump={jump:.2f} color={color:.2f}", flush=True)
+                self.suspect_since = None
+                self.suspect_reason = None
+            elif timestamp - self.suspect_since >= RECOVERY_PROBE_SECONDS:
+                analyzer.reset(self.name, f'probe timeout: {self.suspect_reason}')
+                self.clear()
+                self.anchor = (timestamp, tuple(bbox), histogram(frame, bbox))
+                return bbox  # 새 트랙 첫 유효 샘플
+            else:
+                return None
+
+        # generation 변경은 단독 RESET 사유가 아님: 실제 좌표 연속성을 검증
+        gap, jump, color, ratio = self._compare(self.anchor, bbox, frame, timestamp)
+        if generation_changed:
+            strict = jump <= 0.75 and color <= 0.42
+            near = gap <= 0.35 and ((jump <= 0.35 and color <= 0.72)
+                                    or (jump <= 0.12 and color <= 0.80))
+            moderate = gap <= 0.20 and jump <= 0.55 and color <= 0.60
+            accepted = 0 <= gap <= 0.8 and ratio <= 1.8 and (strict or near or moderate)
+            if not accepted:
+                self.suspect_since = timestamp
+                self.suspect_reason = (f'generation jump={jump:.2f} '
+                                       f'color={color:.2f} size={ratio:.2f}')
+                print(f"[SOM PROBE][{self.name.upper()}] t={timestamp:.1f} "
+                      f"{self.suspect_reason}", flush=True)
+                return None
+            print(f"[SOM KEEP][{self.name.upper()}] generation changed "
+                  f"jump={jump:.2f} color={color:.2f}", flush=True)
+        elif 0 <= gap < 0.35 and jump > 1.25:
+            self.suspect_since = timestamp
+            self.suspect_reason = f'raw CSRT jump={jump:.2f}'
+            print(f"[SOM PROBE][{self.name.upper()}] t={timestamp:.1f} "
+                  f"{self.suspect_reason}", flush=True)
+            return None
+
+        # 큰 추적 공백을 건너뛴 좌표를 잇지 않기
+        if self.missing_since is not None and timestamp - self.missing_since > MAX_TRACKING_GAP:
+            analyzer.reset(self.name, 'recovered after long tracking loss')
+        self.missing_since = None
+        self.anchor = (timestamp, tuple(bbox), histogram(frame, bbox))
+        return bbox
+
+
 class ActivityService:
 
     def __init__(self, tracker, camera, model_path):
@@ -327,6 +386,7 @@ class ActivityService:
             for name, state in tracker.targets.items()
         }
 
+        self.guards = {name: SOMContinuityGuard(name) for name in tracker.targets}
         self.visualizer = ActivityVisualizer()
 
     # ==========================================
@@ -408,6 +468,8 @@ class ActivityService:
             for name, state in self.tracker.targets.items()
         }
 
+        for guard in self.guards.values():
+            guard.clear()
         self.visualizer.clear()
         self.update_results()
 
@@ -515,41 +577,18 @@ class ActivityService:
                 )
 
                 for name, bbox in boxes.items():
-
                     state = self.tracker.targets[name]
                     analyzer = self.analyzers[name]
-
-                    # ==================================
-                    # 추적 세대 변경 감지
-                    # ==================================
-                    if (
-                        state.generation
-                        != self.last_generations[name]
-                    ):
-
-                        print(
-                            f"[TRACK RESET][{name.upper()}] "
-                            f"generation: "
-                            f"{self.last_generations[name]} "
-                            f"-> {state.generation} "
-                            f"state={state.state}",
-                            flush=True,
-                        )
-
-                        analyzer.reset(
-                            target_name=name,
-                            reason="tracker generation changed",
-                        )
-
-                        self.last_generations[name] = (
-                            state.generation
-                        )
-
-                    analyzer.add(
-                        received_at,
-                        bbox,
-                        name,
+                    generation_changed = state.generation != self.last_generations[name]
+                    if generation_changed:
+                        self.last_generations[name] = state.generation
+                    som_bbox = self.guards[name].accept(
+                        frame, received_at, bbox, generation_changed, analyzer
                     )
+                    # 의심 좌표는 None으로 보내어 이동량에 섞지 않음
+                    # 추적 시작 전 불필요한 10초 공백 버퍼를 만들지 않음
+                    if som_bbox is not None or analyzer.samples:
+                        analyzer.add(received_at, som_bbox, name)
 
                 self.update_results()
 
