@@ -145,3 +145,9 @@ Raspberry Pi Camera
 YOLO11n 모델 학습에 사용한 데이터셋 중 일부는 Roboflow Universe에서 제공하는 공개 데이터셋을 활용했습니다.
 
 - **공개 데이터셋 출처:** [Fish Detection Dataset (Roboflow Universe)](https://universe.roboflow.com/zehra-acer/fish-detection-fztlb)
+
+## 활동성 이상 탐지 시연
+
+<img width="400" height="300" alt="normal" src="https://github.com/user-attachments/assets/f6d5d7d4-9960-43e9-af02-5082defc6a81" />
+
+<img width="400" height="300" alt="warning" src="https://github.com/user-attachments/assets/05d1cab3-9954-4c83-91b9-dbde0465e617" />
