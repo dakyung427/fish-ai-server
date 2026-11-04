@@ -139,13 +139,8 @@ Raspberry Pi Camera
 - **Video Processing:** OpenCV, RTSP
 - **Communication:** WebSocket
 
-## 📊 YOLO 모델 성능
+## 📊 YOLO 모델 데이터셋
 
-YOLO11n 모델의 검증 데이터셋 평가 결과입니다.
+YOLO11n 모델 학습에 사용한 데이터셋 중 일부는 Roboflow Universe에서 제공하는 공개 데이터셋을 활용했습니다.
 
-| 평가 지표 | 결과 |
-|---|---:|
-| Precision | 91.9% |
-| Recall | 91.5% |
-| mAP@0.5 | 94.1% |
-| mAP@0.5:0.95 | 73.0% |
+- **공개 데이터셋 출처:** [Fish Detection Dataset (Roboflow Universe)](https://universe.roboflow.com/zehra-acer/fish-detection-fztlb)
