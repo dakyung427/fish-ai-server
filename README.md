@@ -3,6 +3,8 @@
 YOLO11n 기반 관상어 어종 및 개체 수 분석과 SOM 기반 활동성 이상 탐지를 수행하는 FastAPI 서버입니다.
 Raspberry Pi 카메라에서 송출되는 실시간 영상을 RTSP로 수신하여 분석하며 분석 결과는 WebSocket을 통해 Node.js 백엔드 서버로 전달합니다.
 
+🔗 **통합 프로젝트 저장소:** [관상어용 스마트 어항 시스템](https://github.com/ksw2003/fishapp_main)
+
 ## 📁 프로젝트 구조
 
 ```text
