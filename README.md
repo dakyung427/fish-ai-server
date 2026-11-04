@@ -146,7 +146,9 @@ YOLO11n 모델 학습에 사용한 데이터셋 중 일부는 Roboflow Universe�
 
 - **공개 데이터셋 출처:** [Fish Detection Dataset (Roboflow Universe)](https://universe.roboflow.com/zehra-acer/fish-detection-fztlb)
 
-## 활동성 이상 탐지 시연
+<br>
+
+## 🎬 활동성 이상 탐지 시연
 
 <img width="400" height="300" alt="normal" src="https://github.com/user-attachments/assets/f6d5d7d4-9960-43e9-af02-5082defc6a81" />
 
