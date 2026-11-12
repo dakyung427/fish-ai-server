@@ -1,4 +1,4 @@
-"""YOLO + CSRT/HSV tracker with target-conflict rejection and SOM continuity."""
+"""YOLO + CSRT/HSV goldfish tracker with SOM continuity (13-species weights)."""
 import math
 import time
 
@@ -12,7 +12,7 @@ COLOR_CHECK_EVERY = 3
 COLOR_BAD_LIMIT = 4
 COLOR_DISTANCE_LIMIT = 0.48
 MAX_CENTER_JUMP = 2.5
-TARGETS = ("goldfish", "fishmodel")
+TARGETS = ("goldfish",)
 
 SAME_TARGET_MAX_GAP = 4.0
 SAME_TARGET_MAX_JUMP = 2.0
@@ -290,26 +290,6 @@ class FishCSRTTracker:
         self.last_verify = 0.0
         self.last_attempt = 0.0
 
-    def reject_model_drift(self, frame):
-        gold = self.targets["goldfish"]
-        model = self.targets["fishmodel"]
-        if gold.state != "TRACKING" or model.state != "TRACKING":
-            gold.conflict_count = 0
-            return
-        overlap = overlap_ratio(gold.bbox, model.bbox)
-        if overlap < MODEL_OVERLAP_LIMIT:
-            gold.conflict_count = 0
-            return
-        appearance = hist_distance(gold.identity_hist, histogram(frame, gold.bbox))
-        if gold.identity_hist is not None and appearance <= IDENTITY_COLOR_LIMIT:
-            gold.conflict_count = 0  # Goldfish may actually swim past the model
-            return
-        gold.conflict_count += 1
-        if gold.conflict_count >= CONFLICT_FRAMES:
-            gold.reset()  # forces SOM window reset, avoids false movement paths
-            gold.state = "LOST"
-            print("[TRACK] goldfish overlapped fishmodel; dropping wrong tracker", flush=True)
-
     def update(self, frame, now=None):
         now = time.monotonic() if now is None else now
         self.frames += 1
@@ -317,7 +297,6 @@ class FishCSRTTracker:
             name: target.update_csrt(frame, self.frames, now)
             for name, target in self.targets.items()
         }
-        self.reject_model_drift(frame)
         periodic = now - self.last_verify >= VERIFY_INTERVAL
         recovery = (
             any(t.tracker is None or suspects[name] for name, t in self.targets.items())
@@ -332,13 +311,9 @@ class FishCSRTTracker:
                 print(f"[YOLO] Error: {exc}", flush=True)
                 found = {name: [] for name in TARGETS}
             self.last_verify = time.monotonic()
-            model = self.targets["fishmodel"]
-            model.verify(frame, found["fishmodel"], suspects["fishmodel"], now)
-            model_box = model.bbox if model.state == "TRACKING" else None
             self.targets["goldfish"].verify(
-                frame, found["goldfish"], suspects["goldfish"], now, model_box=model_box
+                frame, found["goldfish"], suspects["goldfish"], now
             )
-            self.reject_model_drift(frame)
         return {
             name: t.bbox if t.tracker is not None and t.state == "TRACKING" else None
             for name, t in self.targets.items()
