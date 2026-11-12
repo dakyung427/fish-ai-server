@@ -1,4 +1,4 @@
-"""YOLO + CSRT/HSV tracker with target-conflict rejection and SOM continuity."""
+"""YOLO + CSRT/HSV single fishmodel tracker with SOM continuity."""
 import math
 import time
 
@@ -12,17 +12,10 @@ COLOR_CHECK_EVERY = 3
 COLOR_BAD_LIMIT = 4
 COLOR_DISTANCE_LIMIT = 0.48
 MAX_CENTER_JUMP = 2.5
-TARGETS = ("goldfish", "fishmodel")
+TARGETS = ("fishmodel",)
 
 SAME_TARGET_MAX_GAP = 4.0
 SAME_TARGET_MAX_JUMP = 2.0
-
-# A goldfish candidate cannot replace the model fish at the same position
-# unless its appearance matches the previously learned goldfish appearance.
-MODEL_OVERLAP_LIMIT = 0.55
-IDENTITY_COLOR_LIMIT = 0.42
-CONFLICT_FRAMES = 2
-
 
 def csrt_create():
     if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerCSRT_create"):
@@ -53,17 +46,6 @@ def center(box):
     return int(x + w / 2), int(y + h / 2)
 
 
-def overlap_ratio(a, b):
-    """Intersection / smaller box area, useful when one box is smaller."""
-    if a is None or b is None:
-        return 0.0
-    ax, ay, aw, ah = a
-    bx, by, bw, bh = b
-    w = max(0, min(ax + aw, bx + bw) - max(ax, bx))
-    h = max(0, min(ay + ah, by + bh) - max(ay, by))
-    return (w * h) / max(1, min(aw * ah, bw * bh))
-
-
 def histogram(frame, bbox):
     x, y, w, h = bbox
     x += int(w * 0.15)
@@ -85,6 +67,7 @@ def hist_distance(a, b):
 
 
 def detect_both(model, frame):
+    """Kept original function name for compatibility; detects fishmodel only."""
     results = model.predict(frame, conf=0.2, verbose=False)
     found = {name: [] for name in TARGETS}
     for result in results:
@@ -167,20 +150,7 @@ class TrackState:
         distance = math.dist(center(self.bbox), center(new_box))
         return distance <= max(self.bbox[2], self.bbox[3]) * SAME_TARGET_MAX_JUMP
 
-    def verify(self, frame, found, suspect, now, model_box=None):
-        # Reject goldfish detections sitting on top of the tracked model fish,
-        # unless the appearance is consistent with the established goldfish.
-        if self.name == "goldfish" and model_box is not None:
-            safe = []
-            for bbox, conf in found:
-                if overlap_ratio(bbox, model_box) >= MODEL_OVERLAP_LIMIT:
-                    appearance = hist_distance(self.identity_hist, histogram(frame, bbox))
-                    if self.identity_hist is None or appearance > IDENTITY_COLOR_LIMIT:
-                        print("[TRACK] reject goldfish YOLO box overlapping fishmodel", flush=True)
-                        continue
-                safe.append((bbox, conf))
-            found = safe
-
+    def verify(self, frame, found, suspect, now):
         new_box = pick_detection(
             found, self.bbox,
             strict=(self.tracker is not None and not suspect)
@@ -199,46 +169,14 @@ class TrackState:
                     if previous_box is not None else float("inf")
                 )
 
-                # A fixed identity histogram can become stale as a fish turns
-                # or lighting changes. Trust a recent visual match only if the
-                # new box is also very close to the previous tracked box.
-                # Never use this exception on a fishmodel overlap.
-                model_conflict = (
-                    self.name == "goldfish"
-                    and model_box is not None
-                    and overlap_ratio(new_box, model_box) >= MODEL_OVERLAP_LIMIT
-                )
-                if self.name == "goldfish" and self.identity_hist is not None:
-                    identity_ok = identity_distance <= IDENTITY_COLOR_LIMIT
-                    recent_match = (
-                        not model_conflict
-                        and previous_box is not None
-                        and new_hist is not None
-                        and self.reference_hist is not None
-                        and self.last_good_at is not None
-                        and 0 <= now - self.last_good_at <= 2.0
-                        and normalized_jump <= 0.50
-                        and overlap_ratio(previous_box, new_box) >= 0.40
-                        and recent_distance <= 0.30
-                    )
-                    if not identity_ok and not recent_match:
-                        same_target = False
-                        if model_conflict:
-                            return
-                    elif not identity_ok and recent_match:
-                        print(
-                            f"[TRACK] {self.name} near recent appearance; "
-                            "keeping SOM continuity despite identity color change",
-                            flush=True,
-                        )
+                # Preserve SOM continuity only for a nearby, recently tracked target.
                 if not same_target:
                     print(
                         f"[TRACK DIAG] {self.name} SOM reset: "
                         f"suspect={suspect} tracker_missing={self.tracker is None} "
                         f"jump={normalized_jump:.2f} "
                         f"identity_dist={identity_distance:.3f} "
-                        f"recent_dist={recent_distance:.3f} "
-                        f"model_conflict={model_conflict}",
+                        f"recent_dist={recent_distance:.3f}",
                         flush=True,
                     )
                 self.tracker = create_tracker(frame, new_box)
@@ -248,16 +186,6 @@ class TrackState:
                 self.conflict_count = 0
                 self.state = "TRACKING"
                 self.last_good_at = now
-                if self.name == "goldfish" and new_hist is not None:
-                    if self.identity_hist is None:
-                        self.identity_hist = new_hist.copy()
-                    elif same_target and normalized_jump <= 0.50 and not model_conflict:
-                        # Adapt very slowly; avoid learning an unrelated fish.
-                        self.identity_hist = (
-                            0.95 * self.identity_hist + 0.05 * new_hist
-                        ).astype("float32")
-                        cv2.normalize(self.identity_hist, self.identity_hist,
-                                      1.0, 0, cv2.NORM_L1)
                 if same_target:
                     print(f"[YOLO] {self.name} CSRT recovered (SOM maintained)", flush=True)
                 else:
@@ -290,26 +218,6 @@ class FishCSRTTracker:
         self.last_verify = 0.0
         self.last_attempt = 0.0
 
-    def reject_model_drift(self, frame):
-        gold = self.targets["goldfish"]
-        model = self.targets["fishmodel"]
-        if gold.state != "TRACKING" or model.state != "TRACKING":
-            gold.conflict_count = 0
-            return
-        overlap = overlap_ratio(gold.bbox, model.bbox)
-        if overlap < MODEL_OVERLAP_LIMIT:
-            gold.conflict_count = 0
-            return
-        appearance = hist_distance(gold.identity_hist, histogram(frame, gold.bbox))
-        if gold.identity_hist is not None and appearance <= IDENTITY_COLOR_LIMIT:
-            gold.conflict_count = 0  # Goldfish may actually swim past the model
-            return
-        gold.conflict_count += 1
-        if gold.conflict_count >= CONFLICT_FRAMES:
-            gold.reset()  # forces SOM window reset, avoids false movement paths
-            gold.state = "LOST"
-            print("[TRACK] goldfish overlapped fishmodel; dropping wrong tracker", flush=True)
-
     def update(self, frame, now=None):
         now = time.monotonic() if now is None else now
         self.frames += 1
@@ -317,7 +225,6 @@ class FishCSRTTracker:
             name: target.update_csrt(frame, self.frames, now)
             for name, target in self.targets.items()
         }
-        self.reject_model_drift(frame)
         periodic = now - self.last_verify >= VERIFY_INTERVAL
         recovery = (
             any(t.tracker is None or suspects[name] for name, t in self.targets.items())
@@ -334,11 +241,6 @@ class FishCSRTTracker:
             self.last_verify = time.monotonic()
             model = self.targets["fishmodel"]
             model.verify(frame, found["fishmodel"], suspects["fishmodel"], now)
-            model_box = model.bbox if model.state == "TRACKING" else None
-            self.targets["goldfish"].verify(
-                frame, found["goldfish"], suspects["goldfish"], now, model_box=model_box
-            )
-            self.reject_model_drift(frame)
         return {
             name: t.bbox if t.tracker is not None and t.state == "TRACKING" else None
             for name, t in self.targets.items()
