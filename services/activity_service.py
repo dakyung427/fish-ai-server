@@ -51,6 +51,7 @@ class SOMAnalyzer:
 
         self.warning = 0
         self.final_abnormal = False
+        self.first_evaluation = True
 
         self.last_score = None
         self.last_features = None
@@ -70,6 +71,7 @@ class SOMAnalyzer:
         self.next_eval_t = None
         self.warning = 0
         self.final_abnormal = False
+        self.first_evaluation = True
         self.last_result = "PAUSED" if self.last_score is not None else "WAITING"
         # last_score/last_features/last_analyzed_at: 과거값 표시용. 새 판정이 아님.
 
@@ -142,16 +144,23 @@ class SOMAnalyzer:
         # 정상 점수라도 정지 비율이 60% 이상이면 누적 경고를 유지한다.
         # WARNING 진입은 누적 2, 해제는 누적 0으로 히스테리시스 적용.
         still_ratio = row["still_ratio"]
-        if abnormal:
-            self.warning = min(2, self.warning + 1)
-        elif still_ratio < 0.60:
-            self.warning = max(0, self.warning - 1)
+        if self.first_evaluation:
+            # 시연용: 첫 유효 SOM 분석에서 이상이면 즉시 WARNING
+            self.warning = 2 if abnormal else 0
+            self.final_abnormal = abnormal
+            self.first_evaluation = False
+        else:
+            # 이후 분석은 기존 2회 누적 및 해제 규칙 유지
+            if abnormal:
+                self.warning = min(2, self.warning + 1)
+            elif still_ratio < 0.60:
+                self.warning = max(0, self.warning - 1)
 
-        if self.warning >= 2:
-            self.final_abnormal = True
-        elif self.warning == 0:
-            self.final_abnormal = False
-        # warning == 1이면 직전 확정 상태 유지
+            if self.warning >= 2:
+                self.final_abnormal = True
+            elif self.warning == 0:
+                self.final_abnormal = False
+            # warning == 1이면 직전 확정 상태 유지
 
         self.last_score = score
         self.last_features = row
